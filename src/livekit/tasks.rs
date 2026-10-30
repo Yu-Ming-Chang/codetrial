@@ -238,7 +238,7 @@ async fn brief_replacement(
 ) -> Result<(), Error> {
     let briefing = format!(
         "Authoritative task state: {}. Existing checks and hint support: {}. Issued support request IDs: {}. Already delivered conceptual hints: {}. Do not reset the deadline or repeat supplied hints.\n{}\n{}",
-        session.snapshot(),
+        session.snapshot_now(),
         json!(session.checks),
         session.support_context(),
         json!(&session.task.exercise.hints()[..session.hint_rungs_used]),
@@ -372,7 +372,7 @@ impl TaskRoom<'_> {
     async fn publish_state(&mut self, force: bool) {
         let seq = self.session.seq();
         if force || self.published_seq != Some(seq) {
-            publish(&self.room, TOPIC_TASK_STATE, &self.session.snapshot()).await;
+            publish(&self.room, TOPIC_TASK_STATE, &self.session.snapshot_now()).await;
             self.published_seq = Some(seq);
         }
     }

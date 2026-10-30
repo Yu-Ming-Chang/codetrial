@@ -46,6 +46,35 @@ with it but anywhere else than this computer alone, `loopback_required`. One
 CodeTrial process serves one learner and runs one attempt at a time, in the
 one language the learner chose for it.
 
+## Local recordings
+
+Learners can optionally start a local recording during preparation, after
+allowing the microphone and camera and before Start enters fullscreen. Choose
+this CodeTrial tab and share tab audio in Chrome or Chromium to include Jim
+and the existing task microphone. Anything visible in the captured tab,
+including the camera preview during preparation, is included. Capture prompts are unavailable during work
+because leaving fullscreen or hiding the page ends the attempt. Camera
+sampling, calibrated look-away warnings and all task rules continue while
+recording. Stopping recording stops only tab capture and the audio mix: it
+does not stop the task camera or its monitoring. A camera or detector failure
+still interrupts the attempt; a sustained look-away or hidden page still ends
+it as invalid, with any available recording saved for download.
+
+End recording or browser Stop sharing saves a WebM. Completion, a rule ending,
+or room loss also finalizes it, with a download link retained beside the result.
+If preparation has to replace the microphone and camera, it first finalizes
+any current recording; start a fresh recording after retrying device setup.
+When the connection is lost before Start is acknowledged and the server
+confirms the task never began, preparation offers recording again and keeps
+the previous download available.
+
+The bytes stay in the current browser tab until downloaded and are never
+uploaded. Download before reloading or closing the tab; the browser asks for
+confirmation while recorded media is unsaved (a download the browser blocks
+still counts as saved, so the status text points to the link), except during the attempt, when
+leaving fullscreen would already end it. Result recovery cannot restore local
+media. Recording failure does not end the task.
+
 ## Versions and ownership
 
 The sidecar `promptVersion` is the platform composition version, not an
@@ -458,7 +487,9 @@ The camera rule reads the detector's face count, box and keypoints, and
 estimates head pitch from where the nose sits between the eyes and the mouth
 (or from the box when the keypoints are missing), relative to the learner's own
 calibration. It does not read eye gaze, expression or anything else about a
-face. Frames never leave the machine and are not recorded. Only successful,
+face. The detector neither uploads nor records camera frames. An optional
+local tab recording includes any camera preview visible in the tab, as the
+recording notice explains. Only successful,
 fresh samples count: a detector that stops answering, a camera track that ends
 or mutes, or a sampling gap is a technical interruption, never a look-away.
 More than one face in frame is not a rule.
@@ -596,13 +627,24 @@ UTF-8 bytes, a limit the page enforces before sending), `trigger` enum
 failure, not a failed case. Results are learner-reported practice evidence.
 
 `task_state` (runtime to client): `version`, `seq`, `phase` enum
-`ready | work | wrap-up | feedback`, `deadlineAt`, `interviewer` enum
+`ready | work | wrap-up | feedback`, `deadlineAt`, `serverNow`, `interviewer` enum
 `available | degraded | unavailable`, `checks` (`id`, `state` enum
 `open | covered | unresolved`, `support` enum
 `none | conceptual_hint | targeted_followup`), `hintRungsUsed`, `hintRungsMax`,
 `acknowledgedCaptureRequestId`, `finalRevisionId`, `captureOverflow`,
 `activeTargetId`, and `outcome` (null until the attempt
 ends, then `completed`, `invalid` or `interrupted` with its cause and time).
+`serverNow` is the server time when the snapshot is built, formatted as RFC
+3339 at whole-second resolution, like `deadlineAt`. Only after accepting a new
+sequence number does the page update its server clock offset, and only toward
+a later server time, so a snapshot delayed on the way cannot lengthen the time
+remaining. The page keeps that offset against both the browser's monotonic
+clock and its wall clock and counts down by whichever shows less time left, so
+a different local clock does not move a deadline and a sleep, which stops the
+monotonic clock, can only shorten the time left. A new room starts the offset
+over. A
+snapshot without `serverNow` is refused, so a page served from disk must match
+the binary. This draft field keeps payload version 1.
 
 `board_image` (client to runtime, a byte stream): the learner's whiteboard
 drawing as a JPEG of at most the interview whiteboard's size, with the stroke

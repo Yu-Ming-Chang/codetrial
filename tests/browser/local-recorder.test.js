@@ -208,6 +208,7 @@ async function setup(t, options = {}) {
       state: window.recordingState,
       nodes: { localRecording: document.querySelector("#local-recording") },
       recordingEnabled: options.serverRecording === true,
+      saveReplacedTake: options.saveReplacedTake === true,
       onRecordingChange: (active) => window.recordingChanges.push(active),
     });
   }, options);
@@ -881,6 +882,21 @@ test("discarding a setup take creates no download and allows a fresh recording",
   );
 });
 
+test("a recording reports unsaved media until it is downloaded", async (t) => {
+  const page = await setup(t);
+  if (!page) return;
+  assert.equal(await page.evaluate(() => window.local.unsaved), false);
+  await record(page);
+  assert.equal(await page.evaluate(() => window.local.unsaved), true);
+  await page.evaluate(() => {
+    window.stopped = window.local.stop();
+  });
+  await recorderResult(page, "stopped");
+  await ready(page);
+  // The automatic download counts as saved.
+  assert.equal(await page.evaluate(() => window.local.unsaved), false);
+});
+
 test("the browser Stop sharing action finalizes once", async (t) => {
   const page = await setup(t);
   if (!page) return;
@@ -1045,6 +1061,25 @@ test("an undownloaded partial remains available until a new take is ready", asyn
       .evaluate((node) => node === document.activeElement),
     true,
   );
+});
+
+test("a host can keep an undownloaded take by saving it when another replaces it", async (t) => {
+  const page = await setup(t, { saveReplacedTake: true });
+  if (!page) return;
+  await record(page);
+  await page.evaluate(() => {
+    window.nativeRecorder.onerror();
+    window.nativeRecorder.stop();
+  });
+  await ready(page);
+  assert.equal(await page.evaluate(() => window.downloadClicks), 0);
+  await record(page);
+  await page.evaluate(() => {
+    window.stopped = window.local.stop();
+  });
+  await recorderResult(page, "stopped");
+  // The earlier take, then the new one.
+  assert.equal(await page.evaluate(() => window.downloadClicks), 2);
 });
 
 test("a downloaded partial is released when another recording starts", async (t) => {

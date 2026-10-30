@@ -500,8 +500,8 @@ impl TaskSession {
         }
     }
 
-    /// The snapshot's sequence number. Every change a snapshot shows moves
-    /// it, so a publisher can skip a snapshot whose number it already sent.
+    /// The task state's sequence number. Reading the server clock does not
+    /// move it, so a publisher can skip unchanged state.
     pub fn seq(&self) -> u64 {
         self.seq
     }
@@ -513,8 +513,13 @@ impl TaskSession {
         }
     }
 
-    pub fn snapshot(&self) -> Value {
-        json!({"version": 1, "seq": self.seq, "phase": self.phase, "deadlineAt": self.deadline_at.map(|at| crate::delivery::rfc3339(at as i64)),
+    /// The snapshot as the server publishes it: stamped with the clock now.
+    pub fn snapshot_now(&self) -> Value {
+        self.snapshot(crate::current_epoch_seconds())
+    }
+
+    pub fn snapshot(&self, now: u64) -> Value {
+        json!({"version": 1, "seq": self.seq, "phase": self.phase, "serverNow": crate::delivery::rfc3339(now as i64), "deadlineAt": self.deadline_at.map(|at| crate::delivery::rfc3339(at as i64)),
             "interviewer": self.interviewer, "outcome": self.outcome,
             "checks": self.checks.values().map(|row| json!({"id": row.id, "state": row.state, "support": row.support})).collect::<Vec<_>>(),
             "hintRungsUsed": self.hint_rungs_used, "hintRungsMax": self.task.hint_limit,

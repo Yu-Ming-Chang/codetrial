@@ -953,3 +953,31 @@ dialog button {
     margin-left: auto;
   }
 }
+
+/* Capture prompts during work would break the announced fullscreen rule. */
+#task #local-recording [data-local-start] {
+  display: none;
+}
+
+/* The recording controls share the interview page's markup, which its own
+   stylesheet styles; this page links only this one. */
+.recording-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.recording-row .muted {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
