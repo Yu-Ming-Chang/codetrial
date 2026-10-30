@@ -314,6 +314,7 @@ function pageHarness(phase = "live") {
     roomParticipants: () => [],
     roomInterviewer: () => null,
     setAgentStateLabel: () => {},
+    releaseStart: () => {},
     window: { location: {}, addEventListener() {} },
   };
   const recovery = source.slice(

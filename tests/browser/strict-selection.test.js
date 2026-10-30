@@ -423,6 +423,33 @@ for (const stage of ["token", "join"]) {
   });
 }
 
+// Closing the tab is the usual way a start is given up, and it never reaches
+// the end button. The page leaving while the join is still running hands the
+// interviewer back as well.
+test("a page left while its start awaits the join releases the start", async (t) => {
+  const page = await interview(t, "problem=chargeback-pair-match", (route) =>
+    route.fulfill({ json: grant("chargeback-pair-match", "left-mid-join") }),
+  );
+  if (!page) return;
+  await page.evaluate(() => {
+    window.roomJoinHeld = new Promise((resolve) => {
+      window.releaseJoin = resolve;
+    });
+  });
+  await page.route("**/api/token/release", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+  const released = page.waitForRequest("**/api/token/release");
+  await preflight(page);
+  await page.waitForFunction(() => window.roomJoins.length === 1);
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  assert.deepEqual((await released).postDataJSON(), {
+    roomName: "left-mid-join",
+    token: "left-mid-join",
+  });
+  await page.evaluate(() => window.releaseJoin());
+});
+
 // On a running clock an end with no interviewer becomes the offline summary
 // within a moment, so a slow join finds the page in `report` rather than
 // `ending`. That summary is no report from this room, and the join still
