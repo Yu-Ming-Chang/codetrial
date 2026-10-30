@@ -353,102 +353,120 @@ for (const selection of ["practice", "strict"]) {
 
 // Past the C wait, a start still awaits the token response and then the room
 // join, with the workspace open for both. Ending in either leaves no
-// interview behind: no room, or one left at once, and no live device.
+// interview behind: no room, or one left at once, and no live device. Closing
+// the tab is the other way a start is given up, and the page can release only
+// a start whose token it already holds. A page the back-forward cache keeps
+// gives up nothing: it comes back to the same start.
 for (const stage of ["token", "join"]) {
-  test(`Practice ended while its start awaits the ${stage} leaves no room and releases devices`, async (t) => {
-    if (!browser) return t.skip("playwright chromium unavailable");
-    let respond;
-    const responded = new Promise((resolve) => {
-      respond = resolve;
-    });
-    t.after(() => respond());
-    // The ending's own timers lead to the offline summary, whose cleanup
-    // would release the devices too. A paused clock leaves only the start
-    // that noticed the end to do it.
-    const context = await browser.newContext();
-    t.after(() => context.close());
-    await context.clock.install();
-    const page = await interview(
-      t,
-      "problem=chargeback-pair-match",
-      async (route) => {
-        if (stage === "token") await responded;
-        await route.fulfill({
-          json: grant("chargeback-pair-match", `ended-at-${stage}`),
-        });
-      },
-      context,
-    );
-    if (stage === "join")
-      await page.evaluate(() => {
-        window.roomJoinHeld = new Promise((resolve) => {
-          window.releaseJoin = resolve;
-        });
+  for (const exit of ["end", "pagehide", "kept"]) {
+    const name =
+      exit === "end"
+        ? `Practice ended while its start awaits the ${stage} leaves no room and releases devices`
+        : exit === "kept"
+          ? `A page the back-forward cache keeps while its start awaits the ${stage} keeps the start`
+          : `A page left while its start awaits the ${stage} ${stage === "join" ? "releases the start" : "has no start to release yet"}`;
+    test(name, async (t) => {
+      if (!browser) return t.skip("playwright chromium unavailable");
+      let respond;
+      const responded = new Promise((resolve) => {
+        respond = resolve;
       });
-    // The server holds an interviewer for the granted start until someone
-    // joins, so a start given up after its token hands that interviewer back.
-    await page.route("**/api/token/release", (route) =>
-      route.fulfill({ status: 204 }),
-    );
-    const released = page.waitForRequest("**/api/token/release");
-    const requested = page.waitForRequest("**/api/token");
-    await preflight(page, { pause: true });
-    await requested;
-    if (stage === "join")
-      await page.waitForFunction(() => window.roomJoins.length === 1);
-    await page.locator("#end").click();
-    await page.locator("#ending-overlay:not([hidden])").waitFor();
-    if (stage === "token") respond();
-    else await page.evaluate(() => window.releaseJoin());
-    // The start ends itself once its await returns. A page that carried on
-    // would keep a microphone live and never get here.
-    await page.waitForFunction(
-      () =>
-        window.acquiredTracks.length > 0 &&
-        window.acquiredTracks.every((track) => track.readyState === "ended"),
-      null,
-      { timeout: 5_000 },
-    );
-    assert.deepEqual(
-      await page.evaluate(() => ({
-        joins: window.roomJoins.length,
-        leaves: window.roomLeaves ?? 0,
-      })),
-      stage === "token" ? { joins: 0, leaves: 0 } : { joins: 1, leaves: 1 },
-    );
-    assert.deepEqual((await released).postDataJSON(), {
-      roomName: `ended-at-${stage}`,
-      token: `ended-at-${stage}`,
+      t.after(() => respond());
+      // The ending's own timers lead to the offline summary, whose cleanup
+      // would release the devices too. A paused clock leaves only the start
+      // that noticed the end to do it.
+      const context = await browser.newContext();
+      t.after(() => context.close());
+      await context.clock.install();
+      const room = `${exit}-at-${stage}`;
+      const page = await interview(
+        t,
+        "problem=chargeback-pair-match",
+        async (route) => {
+          if (stage === "token") await responded;
+          await route.fulfill({ json: grant("chargeback-pair-match", room) });
+        },
+        context,
+      );
+      if (stage === "join")
+        await page.evaluate(() => {
+          window.roomJoinHeld = new Promise((resolve) => {
+            window.releaseJoin = resolve;
+          });
+        });
+      // The server holds an interviewer for the granted start until someone
+      // joins, so a start given up after its token hands that interviewer
+      // back.
+      const releases = [];
+      await page.route("**/api/token/release", (route) => {
+        releases.push(route.request().postDataJSON());
+        return route.fulfill({ status: 204 });
+      });
+      const releasing =
+        exit === "end" || (exit === "pagehide" && stage === "join");
+      const released = releasing
+        ? page.waitForRequest("**/api/token/release")
+        : null;
+      const requested = page.waitForRequest("**/api/token");
+      await preflight(page, { pause: true });
+      await requested;
+      if (stage === "join")
+        await page.waitForFunction(() => window.roomJoins.length === 1);
+      if (exit === "end") {
+        await page.locator("#end").click();
+        await page.locator("#ending-overlay:not([hidden])").waitFor();
+      } else {
+        // Chromium's automation disables BFCache, so the event stands in for
+        // both a page discarded and one the cache keeps.
+        await page.evaluate(
+          (persisted) =>
+            window.dispatchEvent(
+              new PageTransitionEvent("pagehide", { persisted }),
+            ),
+          exit === "kept",
+        );
+      }
+      if (stage === "token") respond();
+      else await page.evaluate(() => window.releaseJoin());
+      if (exit === "end") {
+        // The start ends itself once its await returns. A page that carried
+        // on would keep a microphone live and never get here.
+        await page.waitForFunction(
+          () =>
+            window.acquiredTracks.length > 0 &&
+            window.acquiredTracks.every(
+              (track) => track.readyState === "ended",
+            ),
+          null,
+          { timeout: 5_000 },
+        );
+      } else {
+        // A discarded page never gets this far, so only an ended start and a
+        // kept one say what becomes of the room.
+        await page.waitForFunction(() => window.roomJoins.length === 1);
+      }
+      await released;
+      if (exit !== "pagehide")
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            joins: window.roomJoins.length,
+            leaves: window.roomLeaves ?? 0,
+          })),
+          // A kept page finishes its join into the start it still holds.
+          {
+            joins: exit === "end" && stage === "token" ? 0 : 1,
+            leaves: exit === "end" && stage === "join" ? 1 : 0,
+          },
+        );
+      // While `/api/token` is in flight the page has no token to release
+      // with, though the server has already reserved the interviewer.
+      assert.deepEqual(
+        releases,
+        releasing ? [{ roomName: room, token: room }] : [],
+      );
     });
-  });
+  }
 }
-
-// Closing the tab is the usual way a start is given up, and it never reaches
-// the end button. The page leaving while the join is still running hands the
-// interviewer back as well.
-test("a page left while its start awaits the join releases the start", async (t) => {
-  const page = await interview(t, "problem=chargeback-pair-match", (route) =>
-    route.fulfill({ json: grant("chargeback-pair-match", "left-mid-join") }),
-  );
-  if (!page) return;
-  await page.evaluate(() => {
-    window.roomJoinHeld = new Promise((resolve) => {
-      window.releaseJoin = resolve;
-    });
-  });
-  await page.route("**/api/token/release", (route) =>
-    route.fulfill({ status: 204 }),
-  );
-  const released = page.waitForRequest("**/api/token/release");
-  await preflight(page);
-  await page.waitForFunction(() => window.roomJoins.length === 1);
-  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
-  assert.deepEqual((await released).postDataJSON(), {
-    roomName: "left-mid-join",
-    token: "left-mid-join",
-  });
-  await page.evaluate(() => window.releaseJoin());
-});
 
 // On a running clock an end with no interviewer becomes the offline summary
 // within a moment, so a slow join finds the page in `report` rather than
