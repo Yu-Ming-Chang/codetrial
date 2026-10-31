@@ -150,8 +150,11 @@ test("the room disconnects on actual pagehide, not when beforeunload is cancelle
     "state",
     "reportRecovery",
     "localRecording",
+    "releaseStart",
     `${body}\n}\nreturn finalizeRecoveryOnPageHide;`,
-  )(state, reportRecovery, { dispose: () => calls.push("dispose") });
+  )(state, reportRecovery, { dispose: () => calls.push("dispose") }, () =>
+    calls.push("release"),
+  );
   const guard = createBeforeUnloadGuard(target);
 
   guard.setEnabled(true);
@@ -163,6 +166,11 @@ test("the room disconnects on actual pagehide, not when beforeunload is cancelle
 
   // Once navigation really proceeds, pagehide performs room cleanup.
   target.dispatchEvent(new Event("pagehide"));
+  assert.deepEqual(calls, ["dispose", "disconnect", "release"]);
+
+  // A page the back-forward cache keeps comes back to the same start.
+  calls.length = 0;
+  pagehide({ persisted: true });
   assert.deepEqual(calls, ["dispose", "disconnect"]);
 
   guard.dispose();
@@ -455,6 +463,7 @@ test("pagehide finalizes recovery before disconnecting the room", () => {
     "state",
     "reportRecovery",
     "localRecording",
+    "releaseStart",
     `${body}\n}\nreturn finalizeRecoveryOnPageHide;`,
   )(
     {
@@ -468,8 +477,9 @@ test("pagehide finalizes recovery before disconnecting the room", () => {
     },
     { finish: () => calls.push("finish") },
     { dispose: () => calls.push("dispose") },
+    () => calls.push("release"),
   );
 
   handler();
-  assert.deepEqual(calls, ["dispose", "finish", "disconnect"]);
+  assert.deepEqual(calls, ["dispose", "finish", "disconnect", "release"]);
 });

@@ -2899,13 +2899,18 @@ function restoreEndingOverlay() {
   nodes.retryReport.hidden = true;
 }
 
-function finalizeRecoveryOnPageHide() {
+function finalizeRecoveryOnPageHide(event) {
   localRecording.dispose();
   if (state.localUserStream)
     stopPreflight({ userStream: state.localUserStream });
   state.localUserStream = null;
   if (state.phase === "report_recovery") reportRecovery.finish();
   void state.room?.disconnect?.().catch?.(() => {});
+  // Closing the tab mid-start is the usual way a start is given up, and the
+  // interviewer is held for it until someone joins. A page the back-forward
+  // cache keeps still has its join in flight and finishes it on restore, into
+  // a start the server would refuse once released, so that page keeps it.
+  if (!event?.persisted) releaseStart();
 }
 
 window.addEventListener("pagehide", finalizeRecoveryOnPageHide);
