@@ -11,10 +11,39 @@ export function acceptTaskState(previous, incoming) {
     return previous;
   if (
     !["ready", "work", "wrap-up", "feedback"].includes(incoming.phase) ||
-    !Array.isArray(incoming.checks)
+    !Array.isArray(incoming.checks) ||
+    typeof incoming.serverNow !== "string" ||
+    !Number.isFinite(Date.parse(incoming.serverNow))
   )
     return previous;
   return incoming;
+}
+
+/// The server's clock as a fixed distance from the browser's clocks, so a
+/// different local wall clock does not move a deadline. A snapshot only says
+/// what the server's time was when it was built, never how long it spent on
+/// the way; the latest-reading estimate is the one with the least delay, so a
+/// late snapshot cannot pull the clock back. Two distances are kept, from the
+/// monotonic clock and from the wall clock, and the later estimate wins: the
+/// monotonic clock stops while a computer sleeps and the wall clock does not,
+/// so a sleep can only shorten the time left, never lengthen it.
+export function advanceServerClock(offset, serverNow, monotonicNow, wallNow) {
+  const server = Date.parse(serverNow);
+  const reading = { mono: server - monotonicNow, wall: server - wallNow };
+  // The wall distance follows the newest snapshot, so a local clock that was
+  // set after an earlier one is corrected by the next; the monotonic distance
+  // only ratchets up, which keeps a late snapshot from lengthening the time.
+  return {
+    mono: Math.max(reading.mono, offset?.mono ?? reading.mono),
+    wall: reading.wall,
+  };
+}
+
+export function serverTimeAt(offset, monotonicNow, wallNow) {
+  return Math.max(
+    monotonicNow + (offset?.mono ?? 0),
+    wallNow + (offset?.wall ?? 0),
+  );
 }
 
 export function taskLocked(state) {

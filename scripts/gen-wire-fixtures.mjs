@@ -419,6 +419,7 @@ function taskState(overrides = {}) {
     version: 1,
     seq: 0,
     phase: "ready",
+    serverNow: "1970-01-01T00:01:40Z",
     deadlineAt: null,
     interviewer: "available",
     outcome: null,
@@ -615,6 +616,7 @@ const files = {
         payload: taskState({
           seq: 2,
           phase: "feedback",
+          serverNow: "1970-01-01T00:04:52Z",
           deadlineAt: "1970-01-01T00:16:40Z",
           finalRevisionId: "initial",
           outcome: {

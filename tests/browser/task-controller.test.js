@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { ALL_LANGUAGES } from "../../web/compiler-explorer.js";
 import {
   acceptTaskState,
+  advanceServerClock,
   outcomeSentence,
   rulesInWords,
+  serverTimeAt,
   taskLocked,
   taskCodeFileName,
   taskRecovery,
@@ -24,6 +26,7 @@ const state = (seq = 1) => ({
   version: 1,
   seq,
   phase: "work",
+  serverNow: "2030-01-01T00:10:00Z",
   checks: [],
   finalRevisionId: null,
 });
@@ -88,6 +91,9 @@ test("only new authoritative task states update progress", () => {
     acceptTaskState(first, { ...state(2), phase: "invalid" }),
     first,
   );
+  for (const serverNow of [undefined, null, 42, "invalid time"]) {
+    assert.equal(acceptTaskState(first, { ...state(2), serverNow }), first);
+  }
   assert.equal(acceptTaskState(first, state(2)).seq, 2);
 });
 
@@ -217,4 +223,43 @@ test("every language a task may allow has a name and a file extension", () => {
     ALL_LANGUAGES.map((language) => taskCodeFileName("two-sum", language)),
     ["two-sum.py", "two-sum.js", "two-sum.c", "two-sum.cpp", "two-sum.java"],
   );
+});
+
+test("the server clock ignores the local wall clock's start and is not pulled back by a late snapshot", () => {
+  const at = (iso) => Date.parse(iso);
+  // Whatever the browser's wall clock says, the server's time is its own.
+  for (const skew of [-600_000, 0, 600_000]) {
+    let offset = advanceServerClock(
+      null,
+      "2030-01-01T00:10:00Z",
+      5_000,
+      at("2030-01-01T00:10:00Z") + skew,
+    );
+    assert.equal(
+      serverTimeAt(offset, 8_000, at("2030-01-01T00:10:00Z") + skew + 3_000),
+      at("2030-01-01T00:10:03Z"),
+    );
+    // Built at 00:10:02 but delivered after a stall: it reads late.
+    const wall = at("2030-01-01T00:10:00Z") + skew + 3_000;
+    const late = advanceServerClock(
+      offset,
+      "2030-01-01T00:10:02Z",
+      8_000,
+      wall,
+    );
+    assert.equal(
+      serverTimeAt(late, 8_000, wall),
+      serverTimeAt(offset, 8_000, wall),
+    );
+    // A snapshot that arrived promptly may only move the clock forward.
+    offset = advanceServerClock(offset, "2030-01-01T00:10:04Z", 8_000, wall);
+    assert.equal(serverTimeAt(offset, 8_000, wall), at("2030-01-01T00:10:04Z"));
+  }
+});
+
+test("a sleep that stops the monotonic clock only shortens the time left", () => {
+  const start = Date.parse("2030-01-01T00:10:00Z");
+  const offset = advanceServerClock(null, "2030-01-01T00:10:00Z", 1_000, start);
+  // Ten minutes of sleep: the wall clock moved, the monotonic one did not.
+  assert.equal(serverTimeAt(offset, 2_000, start + 600_000), start + 600_000);
 });

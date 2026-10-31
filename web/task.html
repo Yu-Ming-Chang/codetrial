@@ -172,6 +172,40 @@
               <button id="calibrate" disabled>Calibrate</button>
               <p id="calibration-result" role="status"></p>
             </section>
+            <section aria-label="Local recording">
+              <p>
+                Optional: record this CodeTrial tab before pressing Start.
+                Choose this tab and enable Share tab audio. The WebM stays in
+                this browser until downloaded; it is not uploaded. Anything
+                visible in the tab, including the camera preview during setup,
+                is included. Local recording requires Chrome or Chromium.
+              </p>
+              <div id="local-recording" class="recording-row" hidden>
+                <button data-local-start class="pill-button" type="button">
+                  Start recording
+                </button>
+                <button
+                  data-local-stop
+                  class="pill-button"
+                  type="button"
+                  disabled
+                  hidden
+                >
+                  End recording
+                </button>
+                <span
+                  data-local-status
+                  class="muted small visually-hidden"
+                  role="status"
+                ></span>
+                <a
+                  data-local-download
+                  aria-label="Download recording (.webm)"
+                  hidden
+                  >Download</a
+                >
+              </div>
+            </section>
             <div class="start-row">
               <button id="start" class="primary" disabled>
                 Start in fullscreen

@@ -18,6 +18,7 @@ import {
   renderValue,
 } from "./lib.js";
 import { runBrowserTests } from "./runners.js";
+import { initLocalRecording } from "./local-recorder.js";
 import { downloadText } from "./download.js";
 import { readStored, storageArea, writeStored } from "./audio-output.js";
 import {
@@ -46,8 +47,10 @@ import { COMPILED_LANGUAGES } from "./compiler-explorer.js";
 import {
   NOT_DETECTED,
   acceptTaskState,
+  advanceServerClock,
   outcomeSentence,
   rulesInWords,
+  serverTimeAt,
   taskLocked,
   taskCodeFileName,
   taskRecovery,
@@ -74,6 +77,9 @@ let builtIn = null;
 // so the sign-in that follows ends at the server, not at a PIN.
 let wantsInstructor = false;
 let task, state, room, review;
+// The server clock against `performance.now()` and `Date.now()`; null until
+// a snapshot arrives.
+let serverClockOffset = null;
 // The whiteboard, mounted once the page is loaded; `lock` repaints it.
 let board;
 // The editor's syntax colours and line numbers, behind the textarea.
@@ -128,6 +134,49 @@ let monitorTimer = null;
 let wakeLock = null;
 let beepContext = null;
 const id = () => crypto.randomUUID();
+// The microphone and camera are let go together, and a recording of them is
+// finalized first, since its audio comes from this stream.
+function releaseMedia() {
+  const released = media;
+  media = null;
+  void localRecording
+    .stop()
+    .finally(() => released?.getTracks().forEach((track) => track.stop()));
+}
+const localRecordingHome = $("local-recording").parentElement;
+let enteringFullscreen = false;
+const localRecording = initLocalRecording({
+  state: {
+    get localUserStream() {
+      return media;
+    },
+  },
+  nodes: { localRecording: $("local-recording") },
+  recordingEnabled: false,
+  // Task mode never swaps the microphone under a running recording: preparing
+  // devices again stops the recorder first, so the interview page's
+  // room-switch hooks (`isRoomLive`, `refreshMicrophone`) have no work here
+  // and a microphone that ends stops the recording.
+  isRoomLive: () => false,
+  stopFocusTarget: () =>
+    !$("review").hidden
+      ? $("export-review")
+      : !$("task").hidden
+        ? $("maximize-editor")
+        : $("local-recording").querySelector("[data-local-start]"),
+  prepareMicrophone: () => {
+    if (hasStarted())
+      throw new Error("Start recording before starting the task.");
+  },
+  // The capture picker must close before Start requests fullscreen, and Start
+  // waits while the picker is open.
+  canStart: () => !enteringFullscreen && !hasStarted(),
+  // The take lives in this tab alone, so replacing one must not lose it.
+  saveReplacedTake: true,
+  onSetupChange: (active) => {
+    $("start").disabled = active || !startReady();
+  },
+});
 
 /// How often the camera is sampled while preparing and during an attempt.
 const SAMPLE_INTERVAL_MS = 500;
@@ -701,8 +750,7 @@ $("devices").onclick = async () => {
     $("devices").disabled = true;
     $("calibrate").disabled = !task || !acknowledgedAt;
   } catch (value) {
-    media?.getTracks().forEach((track) => track.stop());
-    media = null;
+    releaseMedia();
     $("devices").disabled = false;
     if (value?.code === "calibration_required") detectorStatus(value.message);
     error(
@@ -913,6 +961,7 @@ async function connect() {
     // accepts Start only after this handshake, and a snapshot it published
     // on its own does not count as one.
     state = null;
+    serverClockOffset = null;
     do {
       if (setupFailure) throw setupFailure;
       if (Date.now() >= setupDeadline)
@@ -969,6 +1018,7 @@ function startNeverArrived() {
   stopAttemptTimers();
   dropConnection();
   attempt = "preparing";
+  localRecordingHome.append($("local-recording"));
   if (!task || restored) {
     restored = false;
     showUnlock();
@@ -998,6 +1048,8 @@ function dropConnection() {
   // The old key would replay the admission of the room just left.
   admissionKey = id();
   state = null;
+  // A new room's server may keep another clock; nothing carries over.
+  serverClockOffset = null;
   calibration = null;
   $("start").disabled = true;
   lockChoices(false);
@@ -1012,16 +1064,19 @@ const FULLSCREEN_REQUIRED = {
   message: "Fullscreen is required to start this task.",
 };
 
+// Whether Start may be pressed: connected, calibrated and awaiting it.
+const startReady = () =>
+  Boolean(room && calibration) && !hasStarted() && state?.phase === "ready";
+
 // The Start in progress; a newer one makes an older one's continuation moot.
 let currentStart = null;
 
 $("start").onclick = () => {
-  if (!room || !calibration || hasStarted()) return;
+  if (!room || !calibration || hasStarted() || localRecording.settingUp) return;
   // A camera that stopped since calibration would only interrupt the
   // attempt the moment it began.
   if (!videoTrackReady(media?.getVideoTracks()[0])) {
-    media?.getTracks().forEach((track) => track.stop());
-    media = null;
+    releaseMedia();
     dropConnection();
     $("devices").disabled = !acknowledgedAt;
     $("calibrate").disabled = true;
@@ -1042,9 +1097,11 @@ $("start").onclick = () => {
   const startRecoveryKey = recoveryKey();
   $("start").disabled = true;
   // Fullscreen must be requested synchronously inside this click.
+  enteringFullscreen = true;
   const fullscreen = $("workspace").requestFullscreen?.();
   Promise.resolve(fullscreen)
     .then(async () => {
+      if (currentStart === thisStart) enteringFullscreen = false;
       if (room !== startingRoom || calibration !== startingCalibration)
         throw {
           code: "setup_failed",
@@ -1096,6 +1153,7 @@ $("start").onclick = () => {
       attempt = "running";
       rememberAttempt(startingRoomName, until, startRecoveryKey, false);
       startAttemptTimers();
+      $("task").prepend($("local-recording"));
       show("task");
       clearError();
       armRules();
@@ -1110,9 +1168,11 @@ $("start").onclick = () => {
       else if (document.hidden) endAttempt("invalid", "visibility", 0);
     })
     .catch((value) => {
-      if (currentStart !== thisStart || (room && room !== startingRoom)) return;
+      if (currentStart !== thisStart) return;
+      enteringFullscreen = false;
+      if (room && room !== startingRoom) return;
       if (!hasStarted()) leaveFullscreen();
-      $("start").disabled = !room || !calibration || state?.phase !== "ready";
+      $("start").disabled = !startReady();
       error(
         room !== startingRoom || calibration !== startingCalibration
           ? {
@@ -1178,6 +1238,11 @@ function monitoring() {
 /// camera and microphone are let go too and their light goes out.
 function stopMonitoring() {
   if (hasStarted()) {
+    if (attempt === "lost" && startUnconfirmed) {
+      // The server may send us back to preparation if Start never arrived.
+      void localRecording.stop();
+      $("task").prepend($("local-recording"));
+    } else localRecording.finish($("task"));
     media?.getTracks().forEach((track) => track.stop());
     media = null;
     detector?.close?.();
@@ -1256,7 +1321,10 @@ document.addEventListener("fullscreenchange", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) ruleBroken("visibility");
 });
-window.addEventListener("pagehide", () => {
+window.addEventListener("pagehide", (event) => {
+  // A page kept for back/forward navigation comes back as it was, so its
+  // recorder stays usable; only a page that is really going away lets go.
+  if (!event.persisted) localRecording.dispose();
   if (startInFlight)
     rememberAttempt(
       startInFlight.room,
@@ -1273,6 +1341,14 @@ function renderState(incoming) {
   const accepted = acceptTaskState(state, incoming);
   if (accepted === state) return;
   state = accepted;
+  serverClockOffset = advanceServerClock(
+    serverClockOffset,
+    state.serverNow,
+    performance.now(),
+    Date.now(),
+  );
+  // A new deadline shows now, not at the next tick.
+  if (attemptTimers) paintClock();
   $("phase").textContent = `${state.phase} - Jim ${state.interviewer}`;
   $("checks").replaceChildren(
     ...state.checks.map((check) => {
@@ -1696,6 +1772,7 @@ function renderReview(value, awaitingResult = false) {
   if (room) dropConnection();
   $("clock").textContent = "Task finished";
   $("review").hidden = false;
+  localRecording.finish($("review"));
   $("outcome").textContent = outcomeSentence(value.taskAssessment?.outcome);
   const container = $("review-content");
   container.replaceChildren();
@@ -1766,12 +1843,15 @@ $("export-review").onclick = () =>
 // outright is only an interruption. After the attempt ends, it guards the
 // result still on its way.
 window.addEventListener("beforeunload", (event) => {
-  if (
+  const resultDue =
     hasStarted() &&
     !restored &&
     !["starting", "done"].includes(attempt) &&
-    !monitoring()
-  ) {
+    !monitoring();
+  // Unsaved media outlives the result: the take stays in this tab alone.
+  const mediaUnsaved =
+    localRecording.unsaved && attempt !== "starting" && !monitoring();
+  if (resultDue || mediaUnsaved) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -1779,13 +1859,18 @@ window.addEventListener("beforeunload", (event) => {
 // The clock and the result poll run from Start, or a restored attempt, until
 // the result is shown; before and after there is nothing for them to do.
 let attemptTimers = null;
+function paintClock() {
+  if (!review && state?.deadlineAt)
+    $("clock").textContent = `${formatTime(
+      timeLeft(
+        Date.parse(state.deadlineAt),
+        serverTimeAt(serverClockOffset, performance.now(), Date.now()),
+      ).remaining,
+    )} remaining`;
+}
 function startAttemptTimers() {
   attemptTimers ??= [
-    setInterval(() => {
-      if (!review && state?.deadlineAt)
-        $("clock").textContent =
-          `${formatTime(timeLeft(Date.parse(state.deadlineAt), Date.now()).remaining)} remaining`;
-    }, 1000),
+    setInterval(paintClock, 1000),
     setInterval(pollReview, 5000),
   ];
 }

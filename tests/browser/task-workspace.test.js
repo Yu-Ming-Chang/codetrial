@@ -108,7 +108,7 @@ class Room {
    h.publish();
   }};
   globalThis.oldTaskHarness = globalThis.taskHarness;
-  globalThis.taskHarness = {messages: [], boards: [], disconnect() { owner.handlers.disconnected?.(); }, agentLeaves() { owner.handlers.participantDisconnected?.({identity: "task-agent-room-1"}); }, state: ${JSON.stringify(JSON.parse(read("tests/fixtures/task-state.json")).cases[0].payload)}, publish(topic = "task_state", value = null) { this.state.seq++; owner.handlers.data?.(new TextEncoder().encode(JSON.stringify(value ?? this.state)), {identity: "task-agent-room-1"}, null, topic); }};
+  globalThis.taskHarness = {messages: [], boards: [], disconnect() { owner.handlers.disconnected?.(); }, agentLeaves() { owner.handlers.participantDisconnected?.({identity: "task-agent-room-1"}); }, state: ${JSON.stringify(JSON.parse(read("tests/fixtures/task-state.json")).cases[0].payload)}, publish(topic = "task_state", value = null) { this.state.seq++; if (topic === "task_state" && !value) this.state.serverNow = new Date(Date.now()).toISOString(); owner.handlers.data?.(new TextEncoder().encode(JSON.stringify(value ?? this.state)), {identity: "task-agent-room-1"}, null, topic); }};
  }
  on(topic, callback) {this.handlers[topic] = callback;}
  async connect() { if (globalThis.snapshotOnConnect) globalThis.taskHarness.publish(); }
@@ -3424,3 +3424,450 @@ test("an account signed in without GitHub signs in again before the PIN", async 
     await page.close();
   }
 });
+
+function beforeUnloadPrevented(page) {
+  return page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
+// Fresh devices, calibration, a new recording, then Start.
+async function recordAgainAndStart(page) {
+  await freshCamera(page);
+  await page.click("#devices");
+  await page.waitForFunction(
+    () => !document.getElementById("calibrate").disabled,
+  );
+  await page.click("#calibrate");
+  await calibrationPhases(page);
+  await page.waitForFunction(() => !document.getElementById("start").disabled);
+  await page.click("[data-local-start]");
+  await page.waitForFunction(
+    () => !document.querySelector("[data-local-stop]").hidden,
+  );
+  await page.click("#start");
+  await page.waitForFunction(() => !document.getElementById("code").disabled);
+}
+
+async function prepareLocalRecording(page) {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.setCaptureHandleConfig = ({ handle }) => {
+      window.taskCaptureHandle = handle;
+    };
+  });
+  await page.reload();
+  await prepare(page);
+  await page.evaluate(() => {
+    // Codec coverage lives in local-recorder.test.js. This fixture controls
+    // final data delivery while exercising the task's real lifecycle wiring.
+    globalThis.MediaRecorder = class {
+      static isTypeSupported() {
+        return true;
+      }
+      constructor() {
+        globalThis.taskRecorder = this;
+        this.mimeType = "video/webm";
+        this.state = "inactive";
+      }
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.state = "inactive";
+        queueMicrotask(() => {
+          this.ondataavailable({
+            data: new Blob(["task recording"], { type: this.mimeType }),
+          });
+          this.onstop();
+        });
+      }
+    };
+    navigator.mediaDevices.getDisplayMedia = async () => {
+      const canvas = document.createElement("canvas");
+      const stream = canvas.captureStream(10);
+      canvas.getContext("2d").fillRect(0, 0, 100, 100);
+      const video = stream.getVideoTracks()[0];
+      video.getSettings = () => ({ displaySurface: "browser" });
+      video.getCaptureHandle = () => ({ handle: window.taskCaptureHandle });
+      stream.addTrack(
+        new AudioContext()
+          .createMediaStreamDestination()
+          .stream.getAudioTracks()[0],
+      );
+      return stream;
+    };
+  });
+  await page.click("[data-local-start]");
+  await page.waitForFunction(() =>
+    document.querySelector("[data-local-stop]").textContent.includes("00:"),
+  );
+}
+
+for (const ending of [
+  "finish",
+  "disconnect",
+  "fullscreen",
+  "visibility",
+  "look_down",
+  "no_face",
+  "camera",
+  "detector",
+  "stop_then_look_down",
+]) {
+  test(`local task recording downloads after ${ending}`, async (t) => {
+    const fixture = await pageFor(t);
+    if (!fixture) return;
+    const { page } = fixture;
+    t.after(() => page.close());
+    await prepareLocalRecording(page);
+    await page.click("#start");
+    await page.waitForFunction(() => !document.getElementById("code").disabled);
+    const download = page.waitForEvent("download");
+    if (ending === "stop_then_look_down") {
+      await page.click("[data-local-stop]");
+      await download;
+      assert.equal(await page.locator("#code").isEnabled(), true);
+      assert.equal(
+        await page.evaluate(
+          () => globalThis.cameraStream.getVideoTracks()[0].readyState,
+        ),
+        "live",
+      );
+    }
+    await page.evaluate((ending) => {
+      if (ending === "disconnect") globalThis.taskHarness.disconnect();
+      else if (ending === "fullscreen") document.exitFullscreen();
+      else if (ending === "visibility") {
+        Object.defineProperty(document, "hidden", {
+          get: () => true,
+          configurable: true,
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      } else if (["look_down", "stop_then_look_down"].includes(ending)) {
+        globalThis.faceSample = {
+          ...globalThis.faceSample,
+          face: {
+            box: [0.5, 0.6, 0.2, 0.3],
+            landmarks: [
+              [0.45, 0.4],
+              [0.55, 0.4],
+              [0.5, 0.5],
+              [0.5, 0.5],
+            ],
+          },
+        };
+      } else if (ending === "no_face") {
+        globalThis.faceSample = {
+          available: true,
+          count: 0,
+          confidence: 0,
+          face: null,
+        };
+      } else if (ending === "camera") {
+        globalThis.cameraStream
+          .getVideoTracks()[0]
+          .dispatchEvent(new Event("mute"));
+      } else if (ending === "detector") {
+        globalThis.faceSample = { available: false, count: 0, confidence: 0 };
+      } else {
+        globalThis.taskHarness.state.phase = "feedback";
+        globalThis.taskHarness.publish();
+      }
+    }, ending);
+    if (["look_down", "no_face", "stop_then_look_down"].includes(ending)) {
+      await page.clock.runFor(4000);
+      assert.equal(await page.locator("#countdown").isVisible(), true);
+      assert.deepEqual(await ended(page), []);
+      await page.clock.runFor(3000);
+    } else if (ending === "detector") await page.clock.runFor(6000);
+    const expectedCause = {
+      fullscreen: "fullscreen",
+      visibility: "visibility",
+      look_down: "look_away",
+      no_face: "look_away",
+      stop_then_look_down: "look_away",
+      camera: "camera",
+      detector: "detector",
+    }[ending];
+    if (expectedCause) {
+      assert.deepEqual(await ended(page), [
+        [
+          ["camera", "detector"].includes(ending) ? "interrupted" : "invalid",
+          expectedCause,
+        ],
+      ]);
+      assert.equal(await page.locator("#code").isDisabled(), true);
+    }
+    assert.match((await download).suggestedFilename(), /\.webm$/);
+    assert.equal(
+      await page.locator("#task [data-local-download]").isVisible(),
+      true,
+    );
+    assert.equal(
+      await page
+        .locator("#task [data-local-download]")
+        .getAttribute("href")
+        .then(Boolean),
+      true,
+    );
+    await page.evaluate(
+      (review) => globalThis.taskHarness.publish("task_review", review),
+      result("completed", "finish"),
+    );
+    await page
+      .locator("#review [data-local-download]")
+      .waitFor({ state: "visible" });
+  });
+}
+
+test("task recording finalizes before stopped camera devices are replaced", async (t) => {
+  const fixture = await pageFor(t);
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  await prepareLocalRecording(page);
+  await page.evaluate(() => globalThis.cameraStream.getVideoTracks()[0].stop());
+  await page.click("#start");
+  await page.waitForFunction(() =>
+    document
+      .getElementById("message-text")
+      .textContent.includes("camera stopped"),
+  );
+  assert.equal(await page.locator("[data-local-stop]").isHidden(), true);
+  assert.equal(
+    await page.locator("#prepare [data-local-download]").isVisible(),
+    true,
+  );
+  await recordAgainAndStart(page);
+  assert.equal(
+    await page.evaluate(
+      () => globalThis.cameraStream.getAudioTracks()[0].readyState,
+    ),
+    "live",
+  );
+});
+
+test("task recording can restart after an unconfirmed Start never arrived", async (t) => {
+  const fixture = await pageFor(t, { reviewMissing: true });
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  await prepareLocalRecording(page);
+  await page.evaluate(() => {
+    globalThis.taskHarness.holdStart = true;
+  });
+  await page.click("#start");
+  await page.waitForFunction(() => globalThis.taskHarness.releaseStart);
+  await page.evaluate(() => globalThis.taskHarness.disconnect());
+  await page.waitForFunction(() =>
+    document
+      .getElementById("message-text")
+      .textContent.includes("did not start"),
+  );
+  assert.equal(
+    await page.locator("#prepare [data-local-start]").isVisible(),
+    true,
+  );
+  assert.equal(
+    await page.locator("#prepare [data-local-download]").isVisible(),
+    true,
+  );
+  await recordAgainAndStart(page);
+  const download = page.waitForEvent("download");
+  await page.evaluate(() => document.exitFullscreen());
+  assert.match((await download).suggestedFilename(), /\.webm$/);
+  assert.deepEqual(await ended(page), [["invalid", "fullscreen"]]);
+});
+
+test("task recording can restart after a rule broken during an unconfirmed Start that never arrived", async (t) => {
+  const fixture = await pageFor(t, { reviewMissing: true });
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  await prepareLocalRecording(page);
+  await page.evaluate(() => {
+    globalThis.taskHarness.holdStart = true;
+  });
+  await page.click("#start");
+  await page.waitForFunction(() => globalThis.taskHarness.releaseStart);
+  await page.evaluate(() => document.exitFullscreen());
+  await page.evaluate(() => globalThis.taskHarness.disconnect());
+  await page.waitForFunction(() =>
+    document
+      .getElementById("message-text")
+      .textContent.includes("did not start"),
+  );
+  assert.equal(
+    await page.locator("#prepare [data-local-start]").isVisible(),
+    true,
+  );
+  assert.equal(
+    await page.locator("#prepare [data-local-start]").isDisabled(),
+    false,
+  );
+});
+
+test("leaving while a task recording is unsaved asks first, and a kept page keeps recording usable", async (t) => {
+  const fixture = await pageFor(t);
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  const unloadPrevented = () => beforeUnloadPrevented(page);
+  assert.equal(await unloadPrevented(), false);
+  await prepareLocalRecording(page);
+  assert.equal(await unloadPrevented(), true);
+  // A page restored from the back/forward cache is not torn down.
+  await page.evaluate(() => {
+    const event = new Event("pagehide");
+    event.persisted = true;
+    window.dispatchEvent(event);
+  });
+  assert.equal(await page.locator("[data-local-stop]").isVisible(), true);
+});
+
+test("a take that was not downloaded still asks before leaving after the result", async (t) => {
+  const fixture = await pageFor(t);
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  const unloadPrevented = () => beforeUnloadPrevented(page);
+  await prepareLocalRecording(page);
+  // A lost microphone saves the partial take without downloading it.
+  await page.evaluate(() =>
+    globalThis.cameraStream
+      .getAudioTracks()[0]
+      .dispatchEvent(new Event("ended")),
+  );
+  await page
+    .locator("#prepare [data-local-download]")
+    .waitFor({ state: "visible" });
+  assert.equal(await unloadPrevented(), true);
+  await page.click("#start");
+  await page.waitForFunction(() => !document.getElementById("code").disabled);
+  await page.evaluate(
+    (review) => globalThis.taskHarness.publish("task_review", review),
+    result("completed", "finish"),
+  );
+  await page.locator("#review").waitFor({ state: "visible" });
+  assert.equal(await unloadPrevented(), true);
+  const download = page.waitForEvent("download");
+  await page.locator("#review [data-local-download]").click();
+  await download;
+  assert.equal(await unloadPrevented(), false);
+});
+
+test("an empty task recording returns focus to a visible workspace control", async (t) => {
+  const fixture = await pageFor(t);
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  await prepareLocalRecording(page);
+  await page.click("#start");
+  await page.waitForFunction(() => !document.getElementById("code").disabled);
+  await page.evaluate(() => {
+    globalThis.taskRecorder.stop = function () {
+      this.state = "inactive";
+      queueMicrotask(() => this.onstop());
+    };
+  });
+  await page.click("[data-local-stop]");
+  await page.waitForFunction(
+    () => document.querySelector("[data-local-stop]").hidden,
+  );
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "maximize-editor",
+  );
+  assert.equal(await page.locator("#code").isEnabled(), true);
+});
+
+test("fullscreen entry blocks a new task recording picker until Start settles", async (t) => {
+  const fixture = await pageFor(t);
+  if (!fixture) return;
+  const { page } = fixture;
+  t.after(() => page.close());
+  await prepareLocalRecording(page);
+  const download = page.waitForEvent("download");
+  await page.click("[data-local-stop]");
+  await download;
+  await page.evaluate(() => {
+    const workspace = document.getElementById("workspace");
+    const fullscreen = workspace.requestFullscreen.bind(workspace);
+    workspace.requestFullscreen = () =>
+      new Promise((resolve) => {
+        globalThis.releaseRecordingFullscreen = async () => {
+          await fullscreen();
+          resolve();
+        };
+      });
+    const capture = navigator.mediaDevices.getDisplayMedia;
+    globalThis.taskCaptureRequests = 0;
+    navigator.mediaDevices.getDisplayMedia = (...args) => {
+      globalThis.taskCaptureRequests += 1;
+      return capture(...args);
+    };
+  });
+  await page.click("#start");
+  await page.waitForFunction(() => globalThis.releaseRecordingFullscreen);
+  await page.click("[data-local-start]");
+  assert.equal(await page.evaluate(() => globalThis.taskCaptureRequests), 0);
+  await page.evaluate(() => globalThis.releaseRecordingFullscreen());
+  await page.waitForFunction(() => !document.getElementById("code").disabled);
+});
+
+for (const browserOffset of [-600000, 0, 600000]) {
+  test(`task countdown corrects browser clock offset ${browserOffset} and keeps advancing`, async (t) => {
+    const fixture = await pageFor(t);
+    if (!fixture) return;
+    const { page } = fixture;
+    t.after(() => page.close());
+    await start(page);
+    const serverNow = "2030-01-01T00:10:00Z";
+    await page.clock.setSystemTime(
+      new Date(Date.parse(serverNow) + browserOffset),
+    );
+    await page.evaluate((serverNow) => {
+      const harness = globalThis.taskHarness;
+      const snapshot = {
+        ...harness.state,
+        seq: harness.state.seq + 1,
+        serverNow,
+        deadlineAt: "2030-01-01T00:15:00Z",
+      };
+      globalThis.clockSnapshot = snapshot;
+      harness.publish("task_state", snapshot);
+    }, serverNow);
+    await page.clock.runFor(1000);
+    assert.equal(await page.locator("#clock").textContent(), "04:59 remaining");
+    // Old timestamps and deadlines must not move the accepted clock offset.
+    await page.evaluate(() => {
+      const { seq, ...snapshot } = globalThis.clockSnapshot;
+      for (const staleSeq of [seq - 1, seq]) {
+        globalThis.taskHarness.publish("task_state", {
+          ...snapshot,
+          seq: staleSeq,
+          serverNow: "2030-01-01T02:10:00Z",
+        });
+      }
+    });
+    await page.clock.runFor(2000);
+    assert.equal(await page.locator("#clock").textContent(), "04:57 remaining");
+    // Three seconds in, a snapshot that reads five seconds ahead moves the
+    // clock forward; one that reads behind it, as a delayed one does, cannot
+    // pull it back.
+    for (const serverNow of ["2030-01-01T00:10:08Z", "2030-01-01T00:10:00Z"]) {
+      await page.evaluate((serverNow) => {
+        const snapshot = {
+          ...globalThis.clockSnapshot,
+          seq: globalThis.taskHarness.state.seq + 1,
+          serverNow,
+        };
+        globalThis.taskHarness.publish("task_state", snapshot);
+      }, serverNow);
+    }
+    await page.clock.runFor(2000);
+    assert.equal(await page.locator("#clock").textContent(), "04:50 remaining");
+  });
+}

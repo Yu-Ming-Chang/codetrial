@@ -126,7 +126,7 @@ async fn capture_is_request_acknowledged_atomic_and_finish_can_use_its_reserved_
         .revision(capture("final-capture", "finish"), 104)
         .unwrap();
     assert_eq!(
-        session.snapshot()["acknowledgedCaptureRequestId"],
+        session.snapshot(104)["acknowledgedCaptureRequestId"],
         "final-capture"
     );
     session
@@ -244,7 +244,7 @@ async fn setup_does_not_start_time_and_acknowledgement_latches_it() {
     session.start(2000);
     session.start(2100);
     assert_eq!(session.deadline_at, Some(2900));
-    assert_eq!(session.snapshot()["deadlineAt"], "1970-01-01T00:48:20Z");
+    assert_eq!(session.snapshot(2100)["deadlineAt"], "1970-01-01T00:48:20Z");
 }
 
 #[tokio::test]
@@ -669,19 +669,8 @@ async fn a_check_reference_past_the_cap_is_marked_as_overflow() {
     assert!(session.checks["trace"].turn_support.contains_key("turn-9"));
 }
 
-#[tokio::test]
-async fn published_task_state_matches_the_browser_wire_fixture() {
-    let fixture: Value =
-        serde_json::from_str(include_str!("../../fixtures/task-state.json")).unwrap();
-    assert_eq!(fixture["topic"], crate::runtime::TOPIC_TASK_STATE);
-    let mut session = TaskSession::new(admitted().await, 100);
-    assert_eq!(session.snapshot(), fixture["cases"][0]["payload"]);
-    session.start(100);
-    session
-        .end(end("hide", "invalid", "visibility"), 292)
-        .unwrap();
-    assert_eq!(session.snapshot(), fixture["cases"][1]["payload"]);
-}
+#[path = "session_clock.rs"]
+mod clock;
 
 #[tokio::test]
 async fn a_refused_discuss_changes_nothing_but_the_overflow_flag() {
@@ -699,7 +688,7 @@ async fn a_refused_discuss_changes_nothing_but_the_overflow_flag() {
             .unwrap();
     }
     session.acknowledge_edit("unsaved", "draft 9", 103).unwrap();
-    let before = session.snapshot();
+    let before = session.snapshot(104);
     let mut discuss = action("discuss-full", "discuss", Some("unsaved"));
     discuss.target_id = Some(
         session.task.exercise.live_projection("python")["completionTargets"][0]["id"]
@@ -708,7 +697,7 @@ async fn a_refused_discuss_changes_nothing_but_the_overflow_flag() {
             .to_owned(),
     );
     assert!(session.action(discuss.clone(), 104).is_err());
-    let after = session.snapshot();
+    let after = session.snapshot(104);
     assert_eq!(after["captureOverflow"], true);
     assert_eq!(after["activeTargetId"], before["activeTargetId"]);
     assert_eq!(after["seq"], before["seq"].as_u64().unwrap() + 1);
@@ -846,7 +835,7 @@ async fn a_capture_acknowledgement_is_a_new_snapshot_but_an_edit_is_not() {
     // snapshot is published only when `seq` moves.
     assert!(session.seq() > before);
     assert_eq!(
-        session.snapshot()["acknowledgedCaptureRequestId"],
+        session.snapshot(104)["acknowledgedCaptureRequestId"],
         "capture-1"
     );
 }

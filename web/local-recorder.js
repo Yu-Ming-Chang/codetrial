@@ -7,6 +7,10 @@ export function initLocalRecording({
   isRoomLive,
   prepareMicrophone,
   onRecordingChange,
+  stopFocusTarget,
+  canStart,
+  onSetupChange,
+  saveReplacedTake = false,
 }) {
   const panel = nodes.localRecording;
   const start = panel.querySelector("[data-local-start]");
@@ -66,7 +70,9 @@ export function initLocalRecording({
     if (focused === start && hideStart)
       nextFocus = !hideStop ? stop : !download.hidden ? download : null;
     else if (focused === stop && hideStop)
-      nextFocus = !download.hidden ? download : !hideStart ? start : null;
+      nextFocus = !download.hidden
+        ? download
+        : (stopFocusTarget?.() ?? (!hideStart ? start : null));
     if (nextFocus) {
       nextFocus.hidden = false;
       nextFocus.removeAttribute("disabled");
@@ -153,9 +159,15 @@ export function initLocalRecording({
     try {
       if (!disposed && !discarded && chunks.length) {
         const previous = url;
-        url = URL.createObjectURL(
+        const next = URL.createObjectURL(
           new Blob(chunks, { type: recorder.mimeType }),
         );
+        // With `saveReplacedTake`, a take never downloaded is saved now: its
+        // link is about to point at the new one, and the browser has read the
+        // blob by the time click returns.
+        if (saveReplacedTake && previous && !downloadRequested)
+          download.click();
+        url = next;
         downloadRequested = false;
         download.href = url;
         download.download = `codetrial-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
@@ -174,7 +186,7 @@ export function initLocalRecording({
       (discarded && "Recording discarded. Start again when you are ready.") ||
         failure ||
         (url
-          ? "Local recording ready. Download again if needed."
+          ? "Local recording ready. If the download did not start, use Download."
           : "No local recording was saved."),
     );
     resolveStopped?.();
@@ -201,9 +213,21 @@ export function initLocalRecording({
     return stopped;
   }
 
+  // `onSetupChange` brackets the whole request, picker and audio startup
+  // included, so a host can hold its own actions off while it is open.
   async function startRecording() {
     if (ended || !["idle", "ready", "error"].includes(phase))
       return !ended && phase === "recording";
+    if (canStart && !canStart()) return false;
+    onSetupChange?.(true);
+    try {
+      return await requestRecording();
+    } finally {
+      onSetupChange?.(false);
+    }
+  }
+
+  async function requestRecording() {
     phase = "requesting";
     failure = "";
     discarded = false;
@@ -369,6 +393,10 @@ export function initLocalRecording({
   return {
     start: startRecording,
     stop: stopRecording,
+    // True while the capture picker or audio startup is open.
+    get settingUp() {
+      return phase === "requesting";
+    },
     get needsMicrophone() {
       return !ended && ["requesting", "recording", "stopping"].includes(phase);
     },
@@ -383,6 +411,13 @@ export function initLocalRecording({
             : `Local recording: ${error.message} Download any available recording.`;
         stopRecording();
       }
+    },
+    // Whether closing the tab now would lose media the learner has not saved.
+    get unsaved() {
+      return (
+        ["recording", "stopping"].includes(phase) ||
+        Boolean(url && !downloadRequested)
+      );
     },
     finish(target) {
       ended = true;
