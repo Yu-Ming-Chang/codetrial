@@ -1,8 +1,19 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launchChromium, read, startStaticServer } from "./source.js";
-import { apply, parseAlgorithm, positionCode, solved } from "../../web/cube.js";
+import {
+  launchChromium,
+  pauseClock,
+  read,
+  startStaticServer,
+} from "./source.js";
+import {
+  apply,
+  parseAlgorithm,
+  positionCode,
+  solved,
+  stateFromCode,
+} from "../../web/cube.js";
 
 let browser, server, base;
 before(async () => {
@@ -711,6 +722,55 @@ test("a task that names the cube explainer offers a cube to turn", async (t) => 
     await page.keyboard.press("ArrowRight");
     assert.notEqual(await tilt(), first);
     assert.equal(await code(), "12345671111111");
+  } finally {
+    await page.close();
+  }
+});
+
+test("Reset and Show are not undone by turns still swinging", async (t) => {
+  const ctx = await pageFor(t, { taskOverrides: { explainers: ["cube"] } });
+  if (!ctx) return;
+  const { page } = ctx;
+  const history = () => page.locator(".cube-history").textContent();
+  const code = () => page.locator(".cube-code-value").textContent();
+  // Starts R U R' U' swinging, queues behind it nine turns, which are past what
+  // the cube animates and so land at once, interrupts both and asks for U, then
+  // moves the clock past every turn that could still land.
+  const interrupt = async (replace) => {
+    await page.fill(".cube-algorithm input", "R U R' U'");
+    await page.press(".cube-algorithm input", "Enter");
+    await page.locator(".cube-layer").waitFor({ state: "attached" });
+    await page.fill(".cube-algorithm input", "(R U)4 F");
+    await page.press(".cube-algorithm input", "Enter");
+    await replace();
+    await page.getByRole("button", { name: "U: up face, clockwise" }).click();
+    await page.clock.runFor(2000);
+  };
+  try {
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    await start(page);
+    await page.locator("#cube-explorer").waitFor({ state: "visible" });
+    // A swing ends only when runFor moves the stopped clock, so Reset and Show
+    // land while the first turn is still swinging however slowly the calls
+    // before them run.
+    await pauseClock(page);
+    await interrupt(() =>
+      page.getByRole("button", { name: "Back to the solved cube" }).click(),
+    );
+    assert.equal(await history(), "Moves so far: U");
+    assert.equal(
+      await code(),
+      positionCode(apply(solved(), parseAlgorithm("U"))),
+    );
+    await interrupt(async () => {
+      await page.fill(".cube-load input", "21653471111312");
+      await page.click(".cube-load button");
+    });
+    assert.equal(await history(), "Moves so far: U");
+    assert.equal(
+      await code(),
+      positionCode(apply(stateFromCode("21653471111312"), parseAlgorithm("U"))),
+    );
   } finally {
     await page.close();
   }

@@ -182,6 +182,10 @@ export function mountCubeView(root) {
   let numbers = false;
   let view = "3d";
   let busy = Promise.resolve();
+  // Bumped when Reset or Show replaces the cube. Turns asked for before then
+  // may still be queued on `busy` or swinging, and they belong to the cube
+  // that was replaced, so they are dropped rather than landing on the new one.
+  let generation = 0;
   // The view a learner has dragged to, in degrees; up, left and front show.
   let tilt = { x: -26, y: -38 };
 
@@ -255,6 +259,7 @@ export function mountCubeView(root) {
   const applyButton = button("Apply", "Apply the algorithm", () => {});
   applyButton.type = "submit";
   const reset = button("Reset", "Back to the solved cube", () => {
+    generation += 1;
     state = solved();
     history = [];
     message("");
@@ -304,7 +309,9 @@ export function mountCubeView(root) {
   load.onsubmit = (event) => {
     event.preventDefault();
     try {
-      state = stateFromCode(loadInput.value.trim());
+      const position = stateFromCode(loadInput.value.trim());
+      generation += 1;
+      state = position;
       history = [];
       message("");
       paint();
@@ -388,11 +395,16 @@ export function mountCubeView(root) {
   }
 
   function run(list, animate = true) {
+    const asked = generation;
     // One turn at a time, in the order asked.
     busy = busy.then(async () => {
+      if (asked !== generation) return;
       if (animate && view === "3d" && !reduced()) {
         for (const move of list) {
           await swing(move);
+          // Inside the loop a swing is the only wait, so that is where a Reset
+          // or Show can come in.
+          if (asked !== generation) return;
           state = turn(state, move.face, move.amount);
           history = [...history, move].slice(-MAX_MOVES);
           paint();
