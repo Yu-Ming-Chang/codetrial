@@ -161,7 +161,7 @@ exclude = ["vendor", "desktop"]
 [profile.release]
 strip = "symbols"
 
-# Dependencies are optimized even in a dev build, because `make serve` runs one
+# Dependencies are optimized even in a dev build, because `make web` runs one
 # and the agent's realtime path goes through them: the JPEG codec, the LiveKit
 # SDK, TLS, protobuf. Unoptimized, one 720p frame took 138ms to encode against
 # 6.8ms optimized, and that frame is encoded once a second while Gemini is

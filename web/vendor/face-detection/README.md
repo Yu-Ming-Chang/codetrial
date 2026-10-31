@@ -12,7 +12,7 @@ This directory contains vendored assets for Google MediaPipe Face Detection (WAS
 The three `.js` loaders are committed. The `.binarypb`, `.tflite`, and two
 `.wasm` files are 11.7 MB and are downloaded instead, by
 [`scripts/fetch-vendor.sh`](../../../scripts/fetch-vendor.sh) from the version
-and base URL in [`FETCH`](FETCH). `make build`, `make serve`, `make web`, and
+and base URL in [`FETCH`](FETCH). `make build`, `make web`, and
 `./scripts/test.sh` run it first, and it is a no-op once the pinned bytes are on
 disk. They are listed in `.gitignore` so a stray `git add -A` cannot put them
 back into history.
