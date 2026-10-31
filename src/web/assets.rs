@@ -217,6 +217,13 @@ pub(crate) async fn runtime_config_handler(State(state): State<AppState>) -> Res
         crate::recording::CONSENT_VERSION,
         crate::recording::REPLAY_VERSION
     ));
+
+    // Whether the lobby offers Change keys: only the launch that may rewrite
+    // its config, which the page cannot work out for itself.
+    body.push_str(&format!(
+        "globalThis.CODETRIAL_SETUP_ENABLED = {};\n",
+        state.setup.is_some()
+    ));
     (
         StatusCode::OK,
         [

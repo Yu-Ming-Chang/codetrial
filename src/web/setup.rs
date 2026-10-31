@@ -69,7 +69,10 @@ pub fn setup_service(
                     config_path.clone(),
                     offer.clone(),
                 )
-            }),
+            })
+            // What the page asks first, to tell this from Change keys, which
+            // serves the same page from the full app.
+            .get(|| async { super::json_response(StatusCode::OK, json!({ "configured": false })) }),
         )
         .layer(middleware::from_fn(
             move |request: Request, next: Next| async move {
@@ -97,7 +100,7 @@ pub fn setup_service(
 /// application/json` would otherwise force. That submission writes the
 /// attacker's own LiveKit project into the config every later interview routes
 /// through, and the rebound name is the one thing the request still carries.
-fn host_is_loopback(host: Option<&HeaderValue>, port: u16) -> bool {
+pub(super) fn host_is_loopback(host: Option<&HeaderValue>, port: u16) -> bool {
     let Some((name, host_port)) = host.and_then(split_host) else {
         return false;
     };
@@ -137,8 +140,35 @@ fn loopback_name(name: &str) -> bool {
     )
 }
 
-async fn setup_page() -> Html<&'static str> {
+pub(super) async fn setup_page() -> Html<&'static str> {
     Html(SETUP_PAGE)
+}
+
+/// The policy the full app serves this page under, as Change keys. Its script
+/// and style are inline, so each is allowed by its hash: `'unsafe-inline'`
+/// would also run a script injected into the page that takes the keys.
+pub(super) fn page_policy() -> HeaderValue {
+    static POLICY: std::sync::LazyLock<HeaderValue> = std::sync::LazyLock::new(|| {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let hash = |tag: &str| {
+            let inline = SETUP_PAGE
+                .split_once(&format!("<{tag}>"))
+                .and_then(|(_, rest)| rest.split_once(&format!("</{tag}>")))
+                .map_or("", |(inline, _)| inline);
+            STANDARD.encode(ring::digest::digest(
+                &ring::digest::SHA256,
+                inline.as_bytes(),
+            ))
+        };
+        HeaderValue::from_str(&format!(
+            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; \
+             form-action 'self'; script-src 'sha256-{}'; style-src 'sha256-{}'",
+            hash("script"),
+            hash("style")
+        ))
+        .expect("base64 digests are header-safe")
+    });
+    POLICY.clone()
 }
 
 /// Field `name`s are the contract with `submit_setup`'s JSON keys. Inline,
@@ -232,7 +262,7 @@ const SETUP_PAGE: &str = r#"<!doctype html>
     box-shadow: var(--shadow-card);
   }
   fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
-  fieldset + fieldset { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--hairline); }
+  fieldset + fieldset, #code-row { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--hairline); }
   legend { padding: 0; font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
   .requirement {
     margin-left: 0.5rem;
@@ -314,6 +344,14 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   #status { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
   #status.error { color: var(--critical); }
   #status.ok { color: var(--good); }
+  .notice {
+    margin: 0 0 1.5rem;
+    padding: 1rem;
+    border: 1px solid var(--practice-tint-edge);
+    border-radius: 12px;
+    background: var(--practice-tint);
+    line-height: 1.5;
+  }
   @media (max-width: 600px) {
     main { padding: 1.25rem; }
     header { margin-bottom: 1.25rem; }
@@ -331,11 +369,13 @@ const SETUP_PAGE: &str = r#"<!doctype html>
 <main>
   <header><div class="brand">CODETRIAL</div></header>
   <section class="hero" aria-labelledby="setup-title">
-    <span class="badge">First-time setup</span>
+    <span id="setup-badge" class="badge">First-time setup</span>
     <h1 id="setup-title">Set up CodeTrial</h1>
-    <p class="lead">Connect your services to start practicing live technical interviews.</p>
+    <p id="setup-lead" class="lead">Connect your services to start practicing live technical interviews.</p>
   </section>
+  <p id="restart-notice" class="notice" role="status" hidden>Restart the server to use the new keys. Until then it keeps using the old ones, and so does every interview it starts. Before restarting, make sure no interview is running, including any hosted by an interviewer running elsewhere, which this server cannot see.</p>
   <form id="setup-form">
+    <p id="current-keys" class="group-note" hidden></p>
     <div id="offer" class="offer-row" hidden>
       <p id="offer-text"></p>
       <button id="use-offer" type="button" aria-describedby="offer-text">Use these keys</button>
@@ -348,7 +388,7 @@ const SETUP_PAGE: &str = r#"<!doctype html>
       <small id="import-status" role="status" aria-live="polite"></small>
     </div>
     <fieldset>
-      <legend>LiveKit credentials <span class="requirement">Required</span></legend>
+      <legend>LiveKit credentials <span id="livekit-required" class="requirement">Required</span></legend>
       <p class="group-note">Use the URL and keys from the same LiveKit project.</p>
       <div class="field">
         <label for="livekitUrl">LiveKit URL</label>
@@ -378,6 +418,11 @@ const SETUP_PAGE: &str = r#"<!doctype html>
         <small>Without a Google key, an interview starts but nobody speaks in it unless an interviewer running elsewhere joins the room.</small>
       </div>
     </fieldset>
+    <div id="code-row" class="field" hidden>
+      <label for="code">Change keys code</label>
+      <input id="code" name="code" type="password" autocomplete="off" disabled>
+      <small>Printed in the terminal this server was started from, and new every time it starts.</small>
+    </div>
     <div class="action-row">
       <button id="submit" type="submit">Save and continue</button>
       <div id="status" role="status" aria-live="polite"></div>
@@ -395,6 +440,9 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   const offerText = document.getElementById('offer-text');
   const useOffer = document.getElementById('use-offer');
   const offerStatus = document.getElementById('offer-status');
+  const restartNotice = document.getElementById('restart-notice');
+  // Set once the server says this is Change keys, on a server already running.
+  let editing = false;
 
   // The fields a config file can fill, by the key the file spells them with.
   const IMPORTED = {
@@ -528,7 +576,11 @@ const SETUP_PAGE: &str = r#"<!doctype html>
       return;
     }
     const body = await response.json().catch(() => ({}));
-    if (response.ok) {
+    if (response.ok && editing) {
+      line.className = 'ok';
+      line.textContent = 'Saved.';
+      restartNotice.hidden = false;
+    } else if (response.ok) {
       line.className = 'ok';
       line.textContent = 'Saved. Starting codetrial…';
       waitForRestart();
@@ -551,7 +603,7 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   // host so the person can tell whose it is before using it. A 404 is no offer.
   // `data-checked` is set once the answer has been handled, whichever way it
   // went, so a test can tell "nothing offered" from "not asked yet".
-  (async () => {
+  async function loadOffer() {
     try {
       let response;
       try {
@@ -576,6 +628,49 @@ const SETUP_PAGE: &str = r#"<!doctype html>
       offer.hidden = false;
     } finally {
       offer.dataset.checked = '';
+    }
+  }
+
+  // Asked first: the full app serves this same page as Change keys, and its
+  // answer says what the running config holds, never a key. The cold-start
+  // service answers `configured: false`.
+  (async () => {
+    let found;
+    try {
+      const response = await fetch('/api/setup', { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      found = await response.json();
+    } catch (error) {
+      status.className = 'error';
+      status.textContent = 'Could not read this server\'s settings: ' + error.message + '. Reload the page.';
+      submit.disabled = true;
+      return;
+    }
+    if (!found.configured) {
+      loadOffer();
+      return;
+    }
+    editing = true;
+    document.getElementById('setup-badge').textContent = 'Service settings';
+    document.getElementById('setup-title').textContent = 'Change keys';
+    document.getElementById('setup-lead').textContent =
+      'Fill in only what changes. A blank field keeps its current value, and a new Google key replaces the whole Google key list.';
+    const current = document.getElementById('current-keys');
+    current.textContent = 'This server uses LiveKit at ' + found.livekitEndpoint +
+      (found.googleApiKey ? ', with a Google API key.' : ', without a Google API key.');
+    current.hidden = false;
+    document.getElementById('livekit-required').hidden = true;
+    for (const name of Object.values(IMPORTED)) {
+      form.elements[name].required = false;
+      form.elements[name].placeholder = 'Unchanged';
+    }
+    document.getElementById('code-row').hidden = false;
+    form.elements.code.disabled = false;
+    form.elements.code.required = true;
+    submit.textContent = 'Save changes';
+    if (found.restartPending) {
+      restartNotice.hidden = false;
+      submit.disabled = true;
     }
   })();
 </script>
@@ -635,7 +730,7 @@ impl SetupFields {
 /// time: a newline inside a value is a second line, and a second line is a
 /// config key nobody submitted. `SESSION_SECRET` is one such key, and this
 /// process reads the file it just wrote.
-fn unwritable(key: &str, value: &str) -> Option<String> {
+pub(super) fn unwritable(key: &str, value: &str) -> Option<String> {
     if value.chars().any(char::is_control) {
         return Some(format!("{key} must not contain control characters"));
     }
@@ -780,7 +875,19 @@ pub fn config_from_values(
 /// instant, the LiveKit probe is one round trip, and the Gemini probe opens a
 /// live session, so a submission wrong in the cheapest way is not made to wait
 /// for the most expensive check to say so.
-async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Response> {
+///
+/// `values` is the config the next launch will read, and the LiveKit keys are
+/// taken from it: a submission's own keys for a first-time setup, and for
+/// Change keys the running config with the new keys laid over it, so its model
+/// and settings are what the Gemini session opens with. `google_api_key` is the
+/// key to prove, blank when the submission brings none.
+pub(super) async fn probe_credentials(
+    values: &std::collections::BTreeMap<String, String>,
+    google_api_key: &str,
+    production: bool,
+) -> Option<Response> {
+    let value = |key: &str| values.get(key).map_or("", |value| value.trim());
+
     // The rule the launch on the other side of this page applies to the URL,
     // applied while there is still a form to report it in. Without it a URL
     // this accepts and `web_provider_pool` refuses is written, answered with
@@ -795,7 +902,7 @@ async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Res
     // Reported as it stands, naming `LIVEKIT_URL` rather than the form's
     // `livekitUrl`: the two spellings are the same value, and the one in the
     // message is what the reader will find in the file afterwards.
-    if let Err(error) = crate::config::validate_livekit_url(&fields.livekit_url, production) {
+    if let Err(error) = crate::config::validate_livekit_url(value("LIVEKIT_URL"), production) {
         return Some(super::json_response(
             StatusCode::BAD_REQUEST,
             json!({ "error": error }),
@@ -803,9 +910,9 @@ async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Res
     }
 
     if let Err(error) = crate::livekit::validate_livekit_credentials(
-        &fields.livekit_url,
-        &fields.livekit_api_key,
-        &fields.livekit_api_secret,
+        value("LIVEKIT_URL"),
+        value("LIVEKIT_API_KEY"),
+        value("LIVEKIT_API_SECRET"),
         crate::current_epoch_seconds(),
     )
     .await
@@ -820,10 +927,10 @@ async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Res
         ));
     }
 
-    if fields.google_api_key.is_empty() {
+    if google_api_key.is_empty() {
         return None;
     }
-    let config = match load_from_pairs(fields.pairs().iter().copied()) {
+    let config = match load_from_pairs(values) {
         Ok(config) => config,
         Err(error) => {
             return Some(super::json_response(
@@ -839,7 +946,7 @@ async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Res
     let room_name = format!("{}-smoke", config.room_prefix);
     let boot = bootstrap(&config, &room_name, None, config.default_duration_min);
     let url = std::env::var("CODETRIAL_GEMINI_LIVE_URL")
-        .unwrap_or_else(|_| gemini_live_websocket_url(&fields.google_api_key));
+        .unwrap_or_else(|_| gemini_live_websocket_url(google_api_key));
     match open_live_session_at(&url, &boot, None).await {
         Ok(session) => {
             let _ = session.close().await;
@@ -851,7 +958,7 @@ async fn probe_credentials(fields: &SetupFields, production: bool) -> Option<Res
             // partly Gemini's, and the key was sent in the URL.
             let reason = crate::gemini::redact_api_key(
                 &format!("googleApiKey did not work: {error}"),
-                &fields.google_api_key,
+                google_api_key,
             );
             Some(super::json_response(
                 StatusCode::BAD_REQUEST,
@@ -932,11 +1039,7 @@ fn read_offer(path: &Path) -> Result<(Value, String, Option<String>), String> {
     // information and the query are where a URL carries a credential.
     let url = value("LIVEKIT_URL");
     crate::config::validate_livekit_url(url, false).map_err(|error| format!("{shown}: {error}"))?;
-    let endpoint = format!(
-        "{}{}",
-        crate::config::livekit_scheme(url).map_or("", |(scheme, _, _)| scheme),
-        crate::config::livekit_authority(url)
-    );
+    let endpoint = public_endpoint(url);
     let rotation = value("GOOGLE_API_KEYS")
         .split(',')
         .map(str::trim)
@@ -956,6 +1059,16 @@ fn read_offer(path: &Path) -> Result<(Value, String, Option<String>), String> {
         "googleApiKey": rotation.first().copied().unwrap_or(value("GOOGLE_API_KEY")),
     });
     Ok((submission, endpoint, note))
+}
+
+/// What a page may show of a LiveKit URL: its scheme and host. The user
+/// information and the query are where a URL carries a credential.
+pub(super) fn public_endpoint(url: &str) -> String {
+    format!(
+        "{}{}",
+        crate::config::livekit_scheme(url).map_or("", |(scheme, _, _)| scheme),
+        crate::config::livekit_authority(url)
+    )
 }
 
 /// What the page shows of an offered config: its path, its LiveKit scheme and
@@ -1022,7 +1135,12 @@ async fn submit_setup(
         }
     };
 
-    if let Some(refusal) = probe_credentials(&fields, production).await {
+    let values = fields
+        .pairs()
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    if let Some(refusal) = probe_credentials(&values, &fields.google_api_key, production).await {
         return refusal;
     }
 

@@ -38,6 +38,33 @@ async fn a_panicking_interview_gives_its_capacity_back() {
     );
 }
 
+/// Change keys saves only while nothing runs here, and an interview still
+/// writing its report is running: restarting would lose the report.
+#[tokio::test]
+async fn an_interview_writing_its_report_keeps_the_dispatcher_busy() {
+    let dispatcher = LocalDispatcher {
+        config: crate::config::load_from_pairs([
+            ("LIVEKIT_URL", "wss://primary.example"),
+            ("LIVEKIT_API_KEY", "primary-key"),
+            ("LIVEKIT_API_SECRET", "primary-secret"),
+            ("GOOGLE_API_KEY", "primary-google"),
+        ])
+        .unwrap(),
+        runtime: tokio::runtime::Handle::current(),
+        state: Arc::default(),
+        max_concurrent: 1,
+    };
+    assert!(dispatcher.is_idle());
+    let Reservation::New(slot) = dispatcher.reserve_with_kind("interview-busy", false) else {
+        panic!("an idle dispatcher admits a new room");
+    };
+    assert!(!dispatcher.is_idle());
+    slot.assessment_finished();
+    assert!(!dispatcher.is_idle());
+    drop(slot);
+    assert!(dispatcher.is_idle());
+}
+
 /// The cap is the configured one, not a constant. An operator who set it to
 /// one gets one, and the refusal names the number they chose.
 #[tokio::test]

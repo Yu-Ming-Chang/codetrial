@@ -11,7 +11,7 @@
   "tests/agent/framework.rs": 4640,
   "tests/agent/prompts.rs": 2380,
   "tests/agent/runtime.rs": 2605,
-  "tests/cli.rs": 3288,
+  "tests/cli.rs": 3183,
   "tests/interview_behavior.rs": 1706,
   "tests/recording.rs": 3864,
   "tests/unit/accounts/schema.migration_tests.rs": 1633,

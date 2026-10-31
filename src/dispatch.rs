@@ -62,6 +62,13 @@ pub struct LocalDispatcher {
 }
 
 impl RoomDispatcher for LocalDispatcher {
+    /// A room stays in `live` from admission until its task ends, so one whose
+    /// report is still being written counts too.
+    fn is_idle(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.live.is_empty()
+    }
+
     fn supports_guest_admission(&self) -> bool {
         true
     }

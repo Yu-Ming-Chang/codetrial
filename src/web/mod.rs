@@ -26,6 +26,7 @@ mod pool;
 mod recordings;
 mod selection;
 mod setup;
+mod setup_edit;
 mod tasks;
 mod token;
 mod update;
@@ -45,6 +46,7 @@ pub use interviews::REPLAY_RATE_LIMIT;
 use pool::{ProviderQuota, spawn_provider_quota_refresher};
 pub use recordings::READ_RATE_LIMIT;
 pub use setup::{config_from_values, setup_service};
+pub use setup_edit::SetupContext;
 pub use token::{TOKEN_RATE_LIMIT, TokenConfig, TokenResponse, token_response};
 
 pub const MAX_BODY_BYTES: usize = 8 * 1024;
@@ -215,6 +217,8 @@ pub(crate) struct AppState {
     accounts_required: bool,
     /// Absent in a web-only deployment, where agents are started elsewhere.
     dispatcher: Option<Arc<dyn RoomDispatcher>>,
+    /// Change keys, present only for the launch `SetupContext::new` allows.
+    setup: Option<Arc<SetupContext>>,
     /// The provider and clock the recording pipeline runs against. `None`
     /// wherever `config.recording` is `None`, which is every deployment that
     /// has not provisioned it.
@@ -418,6 +422,7 @@ pub(crate) fn web_router(
     config: WebServerConfig,
     dispatcher: Option<Arc<dyn RoomDispatcher>>,
     recorder: Option<crate::recording::Recorder>,
+    setup: Option<Arc<SetupContext>>,
 ) -> Router {
     let login = login_config(&config);
     let accounts_required = login.is_some();
@@ -527,6 +532,11 @@ pub(crate) fn web_router(
         .route("/api/recordings/{id}", get(recording_handler))
         .route("/api/recordings/{id}/events", get(recording_events_handler))
         .route("/runtime-config.js", get(runtime_config_handler))
+        .route("/setup", get(setup_edit::page_handler))
+        .route(
+            "/api/setup",
+            get(setup_edit::summary_handler).post(setup_edit::save_handler),
+        )
         .route(
             "/api/reports",
             get(list_reports_handler)
@@ -570,6 +580,7 @@ pub(crate) fn web_router(
             accounts,
             accounts_required,
             dispatcher,
+            setup,
             recorder,
             token_limit: TokenRateLimit::with_limit(token::TOKEN_RATE_LIMIT),
             guest_token_limit: TokenRateLimit::with_limit(token::TOKEN_RATE_LIMIT),
@@ -747,6 +758,13 @@ pub trait RoomDispatcher: Send + Sync + 'static {
         None
     }
 
+    /// Whether no interview this dispatcher started is running or still
+    /// writing its report, which is when Change keys may save. `false` unless
+    /// the dispatcher can tell, so one that cannot refuses the save.
+    fn is_idle(&self) -> bool {
+        false
+    }
+
     fn ensure_guest_agent(
         &self,
         _room_name: &str,
@@ -794,7 +812,7 @@ pub fn web_service_with_recorder(
     recorder: crate::recording::Recorder,
 ) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
     warn_about_unfetched_vendor(&config.web_dir);
-    web_router(config, dispatcher, Some(recorder))
+    web_router(config, dispatcher, Some(recorder), None)
         .into_make_service_with_connect_info::<SocketAddr>()
 }
 
@@ -805,6 +823,16 @@ pub fn web_service_with_recorder(
 pub fn web_service_with_dispatcher(
     config: WebServerConfig,
     dispatcher: Option<Arc<dyn RoomDispatcher>>,
+) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    web_service_with_setup(config, dispatcher, None)
+}
+
+/// The same server with Change keys, which only `run_web` can grant: whether
+/// a launch may rewrite its own config depends on how it was started.
+pub fn web_service_with_setup(
+    config: WebServerConfig,
+    dispatcher: Option<Arc<dyn RoomDispatcher>>,
+    setup: Option<SetupContext>,
 ) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
     warn_about_unfetched_vendor(&config.web_dir);
 
@@ -825,7 +853,8 @@ pub fn web_service_with_dispatcher(
             delivery: delivery_provider(recording),
             config: recording.clone(),
         });
-    web_router(config, dispatcher, recorder).into_make_service_with_connect_info::<SocketAddr>()
+    web_router(config, dispatcher, recorder, setup.map(Arc::new))
+        .into_make_service_with_connect_info::<SocketAddr>()
 }
 
 pub(crate) fn unauthorized_response() -> Response {

@@ -69,6 +69,10 @@ import {
   pickPracticeProblem,
 } from "./practice-list.js";
 
+// Only a launch that may rewrite its own config offers Change keys.
+document.querySelector("#change-keys").hidden =
+  globalThis.CODETRIAL_SETUP_ENABLED !== true;
+
 const SETTINGS_KEY = "codetrial.interviewSettings";
 const requestTimeoutMs = 10_000;
 

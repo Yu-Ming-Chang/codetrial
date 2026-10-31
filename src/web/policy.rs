@@ -329,6 +329,8 @@ pub(crate) async fn security_headers(
     next: Next,
 ) -> Response {
     let eval_worker = request.uri().path() == EVAL_WORKER_PATH;
+    // Change keys serves the Setup page, whose script and style are inline.
+    let setup_page = request.uri().path() == "/setup";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -358,6 +360,8 @@ pub(crate) async fn security_headers(
         header::CONTENT_SECURITY_POLICY,
         if eval_worker {
             headers_for.eval_worker_policy
+        } else if setup_page {
+            super::setup::page_policy()
         } else {
             headers_for.policy
         },

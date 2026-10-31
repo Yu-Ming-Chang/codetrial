@@ -284,6 +284,8 @@ fn router_routes_match_a_fixed_allowlist() {
     let mut allowed = vec![
         "/healthz",
         "/runtime-config.js",
+        "/setup",
+        "/api/setup",
         "/api/token",
         "/api/token/release",
         "/api/task-reviews/{room}",
@@ -399,6 +401,9 @@ async fn every_owner_scoped_route_refuses_an_anonymous_request() {
         // asking without a session cannot make the server ask GitHub more.
         "/api/update",
         "/runtime-config.js",
+        // Change keys asks for the code its launch printed instead.
+        "/setup",
+        "/api/setup",
         codetrial::recording::WEBHOOK_ROUTE,
         codetrial::recording::REPLAY_ROUTE,
     ];

@@ -25,6 +25,11 @@ let base = "";
 let submissions = [];
 // What /api/setup/offer answers, or null for the 404 of no offer.
 let offered = null;
+// What GET /api/setup answers: null for the cold-start service, or the running
+// config's summary when the page is Change keys.
+let running = null;
+// What a submission is answered with, or null for a refusal.
+let saved = null;
 
 before(async () => {
   browser = await launchChromium();
@@ -42,14 +47,19 @@ before(async () => {
         response.end(JSON.stringify(offered ?? {}));
         return true;
       }
+      if (url.pathname === "/api/setup" && request.method === "GET") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(running ?? { configured: false }));
+        return true;
+      }
       if (url.pathname === "/api/setup") {
         let body = "";
         for await (const chunk of request) body += chunk;
         submissions.push(JSON.parse(body));
-        response.statusCode = 400;
+        response.statusCode = saved ? 200 : 400;
         response.setHeader("content-type", "application/json");
         response.end(
-          JSON.stringify({ error: "Check the LiveKit credentials" }),
+          JSON.stringify(saved ?? { error: "Check the LiveKit credentials" }),
         );
         return true;
       }
@@ -449,4 +459,69 @@ test("setup reports an offered config it cannot use", async (t) => {
   );
   assert.equal(await page.locator("#use-offer").isVisible(), false);
   assert.equal(await page.locator("#import-status").innerText(), "");
+});
+
+test("change keys keeps blank fields, asks for the code and says a restart is due", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  submissions = [];
+  running = {
+    configured: true,
+    livekitEndpoint: "wss://example.livekit.cloud",
+    googleApiKey: false,
+    restartPending: false,
+  };
+  t.after(() => {
+    running = null;
+    saved = null;
+  });
+  const page = await browser.newPage({ viewport: { width: 320, height: 800 } });
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  await page.getByRole("heading", { name: "Change keys" }).waitFor();
+  assert.equal(
+    await page.locator("#current-keys").innerText(),
+    "This server uses LiveKit at wss://example.livekit.cloud, without a Google API key.",
+  );
+  // Only the code: a blank key is one the file keeps.
+  assert.deepEqual(
+    await page
+      .locator("input:required")
+      .evaluateAll((inputs) => inputs.map((input) => input.id)),
+    ["code"],
+  );
+  assert.equal(await page.locator("#offer").isVisible(), false);
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+    true,
+    "change keys overflows a 320px viewport",
+  );
+
+  // A refused save leaves the form as it was, ready to try again.
+  await page.locator("#code").fill("printed-code");
+  await page.locator("#submit").click();
+  await page.locator("#status.error").waitFor();
+  assert.equal(await page.locator("#submit").isEnabled(), true);
+
+  saved = { saved: true };
+  await page.locator("#googleApiKey").fill("new-google");
+  await page.locator("#submit").click();
+  await page.locator("#restart-notice").waitFor();
+  assert.match(
+    await page.locator("#restart-notice").innerText(),
+    /Until then it keeps using the old ones, and so does every interview it starts\./,
+  );
+  assert.equal(await page.locator("#submit").isEnabled(), false);
+  const blank = { livekitUrl: "", livekitApiKey: "", livekitApiSecret: "" };
+  assert.deepEqual(submissions, [
+    { ...blank, googleApiKey: "", code: "printed-code" },
+    { ...blank, googleApiKey: "new-google", code: "printed-code" },
+  ]);
+
+  // Until the restart, coming back says so and offers no second save.
+  running = { ...running, restartPending: true };
+  await page.reload();
+  await page.locator("#restart-notice").waitFor();
+  assert.equal(await page.locator("#submit").isEnabled(), false);
 });

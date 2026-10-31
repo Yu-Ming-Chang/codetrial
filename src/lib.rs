@@ -63,6 +63,38 @@ pub fn exe_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+/// Exits once standard input reaches end of file, when the process environment
+/// sets `CODETRIAL_EXIT_WITH_STDIN`.
+///
+/// For a launcher that runs this as its child. A pipe is closed by the kernel
+/// when its writer dies however it dies, so this is the one way a child learns
+/// its parent is gone on every platform alike: a crashed desktop app otherwise
+/// leaves this server holding its fixed port, and the next launch fails to
+/// bind it. From the process environment even for a `--data-dir` launch, which
+/// reads no configuration there, because this is not configuration: it is the
+/// launcher describing the pipe it handed over, and it has to hold while Setup
+/// serves, before any config file exists.
+///
+/// Returns whether it does, which is whether a program started this server as
+/// its child.
+pub fn exit_when_stdin_closes() -> bool {
+    use std::io::Write as _;
+
+    if !config::exit_with_stdin(std::env::var("CODETRIAL_EXIT_WITH_STDIN").ok().as_deref()) {
+        return false;
+    }
+    std::thread::spawn(|| {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+
+        // Not `eprintln!`, which panics when stderr is a pipe nobody reads any
+        // more: when the parent died, it held the other end of that one too,
+        // and the panic would end this thread instead of the process.
+        let _ = writeln!(std::io::stderr(), "standard input closed: exiting");
+        std::process::exit(0);
+    });
+    true
+}
+
 /// Writes a new file that only its owner can read, and refuses rather than
 /// replacing one: the config file Setup writes and the session key a
 /// `--data-dir` launch makes both hold secrets.

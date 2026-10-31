@@ -10076,3 +10076,22 @@ lobbyTest(
     assert.equal(await offer.isVisible(), true);
   },
 );
+
+lobbyTest(
+  "the lobby offers change keys only when its server can save them",
+  async (page) => {
+    await lobby(page);
+    assert.equal(await page.locator("#change-keys").isVisible(), false);
+
+    await page.route("**/runtime-config.js", (route) =>
+      route.fulfill({
+        contentType: "text/javascript",
+        body: "globalThis.CODETRIAL_SETUP_ENABLED = true;\n",
+      }),
+    );
+    await lobby(page);
+    const link = page.locator("#change-keys");
+    assert.equal(await link.isVisible(), true);
+    assert.equal(await link.getAttribute("href"), "/setup");
+  },
+);

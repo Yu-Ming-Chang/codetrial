@@ -112,6 +112,12 @@ tree-sitter-java = "=0.23.5"
 tree-sitter-javascript = "=0.25.0"
 tree-sitter-python = "=0.25.0"
 
+# Change keys gives the file that replaces the config an owner-only DACL, and
+# `unsafe_code` is forbidden here, so the Windows security calls come through
+# this crate's safe wrappers.
+[target.'cfg(windows)'.dependencies]
+windows-permissions = "0.2.4"
+
 # Only the tests need these. `livekit-protocol` unifies with LiveKit; HMAC and
 # SHA-256 remain independent fixture implementations.
 #
